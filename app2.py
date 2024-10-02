@@ -5,7 +5,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import List
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import chainlit as cl
 from chainlit.config import config
@@ -70,7 +70,7 @@ class EventHandler(AsyncAssistantEventHandler):
         self.current_tool_call = tool_call.id
         self.current_step = cl.Step(name=tool_call.type, type="tool")
         self.current_step.language = "python"
-        self.current_step.created_at = datetime.utcnow()
+        self.current_step.created_at = datetime.now(timezone.utc)
         await self.current_step.send()
 
     async def on_tool_call_delta(self, delta, snapshot):
@@ -79,7 +79,7 @@ class EventHandler(AsyncAssistantEventHandler):
             self.current_tool_call = snapshot.id
             self.current_step = cl.Step(name=delta.type, type="tool")
             self.current_step.language = "python"
-            self.current_step.start = datetime.utcnow()
+            self.current_step.start = datetime.now(timezone.utc)
             await self.current_step.send()
 
         if delta.type == "code_interpreter":
@@ -93,7 +93,7 @@ class EventHandler(AsyncAssistantEventHandler):
                             output=output.logs,
                             language="markdown",
                             start=self.current_step.start,
-                            end=datetime.utcnow()
+                            end=datetime.now(timezone.utc)
                         )
                         await error_step.send()
             elif delta.code_interpreter.input:
@@ -101,7 +101,7 @@ class EventHandler(AsyncAssistantEventHandler):
 
     async def on_tool_call_done(self, tool_call):
         """Updates the step when the tool call is complete."""
-        self.current_step.end = datetime.utcnow()
+        self.current_step.end = datetime.now(timezone.utc)
         await self.current_step.update()
 
     async def on_image_file_done(self, image_file):

@@ -1,6 +1,6 @@
 import os
 import sys
-import logging
+import structlog
 from io import BytesIO
 from pathlib import Path
 from typing import List
@@ -8,14 +8,29 @@ from typing import List
 from datetime import datetime, timezone
 
 import chainlit as cl
+from structlog.stdlib import LoggerFactory
 from chainlit.config import config
 from chainlit.element import Element
 
 from openai import AsyncAssistantEventHandler, AsyncOpenAI, OpenAI
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Set up structured logging
+structlog.configure(
+    processors=[
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.JSONRenderer()
+    ],
+    context_class=dict,
+    logger_factory=LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger(__name__)
 
 # Environment Variables
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -37,7 +52,7 @@ sync_openai_client = OpenAI(api_key=OPENAI_API_KEY)
 try:
     assistant = sync_openai_client.beta.assistants.retrieve(OPENAI_ASSISTANT_ID)
 except Exception as e:
-    logger.error("Failed to retrieve the assistant.")
+    logger.error("Failed to retrieve the assistant", error=str(e))
     sys.exit("Error: Failed to retrieve the assistant.")
 
 # Update Chainlit Config
@@ -120,7 +135,7 @@ class EventHandler(AsyncAssistantEventHandler):
             self.current_message.elements.append(image_element)
             await self.current_message.update()
         except Exception as e:
-            logger.error(f"Failed to retrieve image file: {e}")
+            logger.error("Failed to retrieve image file", error=str(e))
             await cl.Message(content="An error occurred while retrieving an image.").send()
 
 @cl.step(type="tool")
@@ -133,7 +148,7 @@ async def speech_to_text(audio_buffer: BytesIO) -> str:
         )
         return response.text
     except Exception as e:
-        logger.error(f"Error during speech to text transcription: {e}")
+        logger.error("Error during speech to text transcription", error=str(e))
         raise e
 
 async def upload_files(files: List[Element]) -> List[str]:
@@ -145,9 +160,9 @@ async def upload_files(files: List[Element]) -> List[str]:
                 file=Path(file.path), purpose="assistants"
             )
             file_ids.append(uploaded_file.id)
-            logger.info(f"Uploaded file {file.name} with ID {uploaded_file.id}")
+            logger.info("File uploaded", file_name=file.name, file_id=uploaded_file.id)
         except Exception as e:
-            logger.error(f"Error uploading file '{file.name}': {e}")
+            logger.error("Error uploading file", file_name=file.name, error=str(e))
             await cl.Message(content=f"An error occurred while uploading file '{file.name}'.").send()
     return file_ids
 
@@ -180,12 +195,12 @@ async def start_chat():
         thread = await async_openai_client.beta.threads.create()
         # Store the thread ID in the user session
         cl.user_session.set("thread_id", thread.id)
-        logger.info(f"New chat started with thread ID {thread.id}")
+        logger.info("New chat started", thread_id=thread.id)
         # Send the assistant's avatar and greeting message
         await cl.Avatar(name=assistant.name, path="./public/logo.png").send()
         await cl.Message(content=f"Hello, I'm {assistant.name}!", disable_feedback=True).send()
     except Exception as e:
-        logger.error(f"Error starting chat: {e}")
+        logger.error("Error starting chat", error=str(e))
         await cl.Message(content="An error occurred while starting the chat. Please try again later.").send()
 
 @cl.on_message
@@ -210,7 +225,7 @@ async def main(message: cl.Message):
             content=message.content,
             attachments=attachments,
         )
-        logger.info(f"User message added to thread {thread_id}")
+        logger.info("User message added to thread", thread_id=thread_id)
 
         # Create and stream a response from the assistant
         async with async_openai_client.beta.threads.runs.stream(
@@ -219,9 +234,9 @@ async def main(message: cl.Message):
             event_handler=EventHandler(assistant_name=assistant.name),
         ) as stream:
             await stream.until_done()
-            logger.info("Assistant response streamed successfully.")
+            logger.info("Assistant response streamed successfully")
     except Exception as e:
-        logger.error(f"Error in main message handler: {e}")
+        logger.error("Error in main message handler", error=str(e))
         await cl.Message(content="An error occurred while processing your message. Please try again.").send()
 
 @cl.on_audio_chunk
@@ -235,13 +250,13 @@ async def on_audio_chunk(chunk: cl.AudioChunk):
             # Initialize the session for a new audio stream
             cl.user_session.set("audio_buffer", buffer)
             cl.user_session.set("audio_mime_type", chunk.mimeType)
-            logger.info(f"Started receiving audio: {buffer.name}")
+            logger.info("Started receiving audio", buffer_name=buffer.name)
 
         # Write the chunk data to the buffer
         audio_buffer: BytesIO = cl.user_session.get("audio_buffer")
         audio_buffer.write(chunk.data)
     except Exception as e:
-        logger.error(f"Error handling audio chunk: {e}")
+        logger.error("Error handling audio chunk", error=str(e))
 
 @cl.on_audio_end
 async def on_audio_end(elements: List[Element]):
@@ -252,7 +267,7 @@ async def on_audio_end(elements: List[Element]):
 
     if not audio_buffer or not audio_mime_type:
         await cl.Message(content="No audio data received.").send()
-        logger.warning("No audio data found in session.")
+        logger.warning("No audio data found in session")
         return
 
     try:
@@ -269,7 +284,7 @@ async def on_audio_end(elements: List[Element]):
 
         # Transcribe the audio
         transcription = await speech_to_text(audio_buffer)
-        logger.info("Audio transcription completed.")
+        logger.info("Audio transcription completed")
 
         # Clean up the audio buffer and MIME type from the session
         cl.user_session.delete("audio_buffer")
@@ -280,5 +295,5 @@ async def on_audio_end(elements: List[Element]):
         msg = cl.Message(author="You", content=transcription, elements=elements)
         await main(message=msg)
     except Exception as e:
-        logger.error(f"Error processing audio: {e}")
+        logger.error("Error processing audio", error=str(e))
         await cl.Message(content="An error occurred while processing your audio. Please try again.").send()

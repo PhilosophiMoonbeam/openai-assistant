@@ -3,3 +3,4 @@ translations
 .files
 __pycache__
 .aider*
+myvenv/
